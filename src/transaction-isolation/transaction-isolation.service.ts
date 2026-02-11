@@ -54,6 +54,7 @@ export class TransactionIsolationService {
       };
     }
 
+    // 1. Initial state
     const initialBalance = Number(accountA.balance);
     stepResults.push({
       step: '1',
@@ -62,7 +63,6 @@ export class TransactionIsolationService {
       data: { balance: initialBalance },
     });
 
-    // Two concurrent transactions: A updates and holds; B reads with chosen isolation; then A rolls back
     const runnerA = this.dataSource.createQueryRunner();
     const runnerB = this.dataSource.createQueryRunner();
     await runnerA.connect();
@@ -71,6 +71,7 @@ export class TransactionIsolationService {
     let readInB: number | null = null;
 
     try {
+      // 2. Transaction A updates (uncommitted; will roll back later)
       await runnerA.startTransaction();
       const txRepoA = runnerA.manager.getRepository(Account);
       await txRepoA.update({ name: 'Account A' }, { balance: 999 });
@@ -81,6 +82,7 @@ export class TransactionIsolationService {
         data: { balance: 999 },
       });
 
+      // 3. Transaction B reads with chosen isolation level
       await runnerB.query(
         `SET SESSION TRANSACTION ISOLATION LEVEL ${isolationLevel}`,
       );
@@ -102,6 +104,7 @@ export class TransactionIsolationService {
       await runnerB.release();
     }
 
+    // 4. After Transaction A rolled back: final state
     const afterRollback = await repo.findOne({ where: { name: 'Account A' } });
     const finalBalance = afterRollback ? Number(afterRollback.balance) : null;
     stepResults.push({
@@ -124,12 +127,73 @@ export class TransactionIsolationService {
     };
   }
 
+  async runNonRepeatableReadScenario(isolationLevel: IsolationLevel): Promise<ScenarioResult> {
+    const stepResults: StepResult[] = [];
+    const repo = this.dataSource.getRepository(Account);
+    const runnerA = this.dataSource.createQueryRunner();
+    const runnerB = this.dataSource.createQueryRunner();
+    await runnerA.connect();
+    await runnerB.connect();
+  
+    try {
+      // 1. Initial State
+      const accountA = await repo.findOne({ where: { name: 'Account A' } });
+      if (!accountA) {
+        throw new Error('Account A not found');
+      }
+      const initialBalance = Number(accountA.balance);
+      stepResults.push({ step: '1', transaction: 'initial', description: 'Account A balance', data: { balance: initialBalance } });
+
+      // 2. Transaction B starts and reads
+      await runnerB.query(`SET SESSION TRANSACTION ISOLATION LEVEL ${isolationLevel}`);
+      await runnerB.startTransaction();
+      const row1 = await runnerB.manager.findOne(Account, { where: { name: 'Account A' } });
+      if (!row1) {
+        throw new Error('Account A not found');
+      }
+      const firstReadB = Number(row1.balance);
+      stepResults.push({ step: '2', transaction: 'B', description: `B reads first time (${isolationLevel})`, data: { balance: firstReadB } });
+  
+      // 3. Transaction A updates and COMMITS
+      await runnerA.startTransaction();
+      await runnerA.manager.update(Account, { name: 'Account A' }, { balance: 888 });
+      await runnerA.commitTransaction();
+      stepResults.push({ step: '3', transaction: 'A', description: 'A updates balance to 888 and COMMITS' });
+  
+      // 4. Transaction B reads AGAIN
+      const row2 = await runnerB.manager.findOne(Account, { where: { name: 'Account A' } });
+      if (!row2) {
+        throw new Error('Account A not found');
+      }
+      const secondReadB = Number(row2.balance);
+      await runnerB.commitTransaction();
+      
+      stepResults.push({ step: '4', transaction: 'B', description: `B reads second time (${isolationLevel})`, data: { balance: secondReadB } });
+  
+      const occurred = firstReadB !== secondReadB;
+      return {
+        scenario: 'non-repeatable-read',
+        isolationLevel,
+        stepResults,
+        summary: occurred 
+          ? `Non-repeatable read occurred! B saw ${firstReadB} then ${secondReadB}.`
+          : `Repeatable read maintained: B saw ${firstReadB} both times.`
+      };
+    } finally {
+      await runnerA.release();
+      await runnerB.release();
+    }
+  }
+
   async runScenario(
     scenario: string,
     isolationLevel: IsolationLevel,
   ): Promise<ScenarioResult> {
     if (scenario === 'dirty-read') {
       return this.runDirtyReadScenario(isolationLevel);
+    }
+    if (scenario === 'non-repeatable-read') {
+      return this.runNonRepeatableReadScenario(isolationLevel);
     }
     return {
       scenario,

@@ -35,6 +35,14 @@ export class TransactionIsolationController {
     return this.service.runScenario('dirty-read', level);
   }
 
+  @Get('scenarios/non-repeatable-read')
+  async nonRepeatableRead(
+    @Query('isolation') isolation?: string,
+  ): Promise<ScenarioResult> {
+    const level = parseIsolationLevel(isolation ?? 'READ COMMITTED');
+    return this.service.runScenario('non-repeatable-read', level);
+  }
+
   @Get('scenarios/:name')
   async runScenario(
     @Param('name') name: string,
