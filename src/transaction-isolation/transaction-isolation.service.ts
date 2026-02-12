@@ -185,6 +185,53 @@ export class TransactionIsolationService {
     }
   }
 
+  async runPhantomReadScenario(isolationLevel: IsolationLevel): Promise<ScenarioResult> {
+    const stepResults: StepResult[] = [];
+    const runnerA = this.dataSource.createQueryRunner();
+    const runnerB = this.dataSource.createQueryRunner();
+    await runnerA.connect();
+    await runnerB.connect();
+  
+    try {
+      // 1. Initial State: Only 2 accounts exist
+      const initialCount = await this.dataSource.getRepository(Account).count();
+      stepResults.push({ step: '1', transaction: 'initial', description: 'Total accounts in DB', data: { count: initialCount } });
+  
+      // 2. Transaction B starts and counts accounts > 100
+      await runnerB.query(`SET SESSION TRANSACTION ISOLATION LEVEL ${isolationLevel}`);
+      await runnerB.startTransaction();
+      const [rows1, count1] = await runnerB.manager.findAndCount(Account);
+      stepResults.push({ step: '2', transaction: 'B', description: `B counts accounts (${isolationLevel})`, data: { count: count1 } });
+  
+      // 3. Transaction A INSERTS a new account and COMMITS
+      await runnerA.startTransaction();
+      await runnerA.manager.insert(Account, { name: 'Account C', balance: 777 });
+      await runnerA.commitTransaction();
+      stepResults.push({ step: '3', transaction: 'A', description: 'A inserts "Account C" and COMMITS' });
+  
+      // 4. Transaction B counts AGAIN
+      const [rows2, count2] = await runnerB.manager.findAndCount(Account);
+      await runnerB.commitTransaction();
+      
+      stepResults.push({ step: '4', transaction: 'B', description: `B counts accounts again (${isolationLevel})`, data: { count: count2 } });
+  
+      const phantomOccurred = count1 !== count2;
+      return {
+        scenario: 'phantom-read',
+        isolationLevel,
+        stepResults,
+        summary: phantomOccurred 
+          ? `Phantom Read occurred! B saw ${count1} then ${count2} accounts.`
+          : `No Phantom Read: B saw ${count1} accounts both times.`
+      };
+    } finally {
+      // Cleanup: Delete Account C so the demo stays clean
+      await this.dataSource.getRepository(Account).delete({ name: 'Account C' });
+      await runnerA.release();
+      await runnerB.release();
+    }
+  }
+
   async runScenario(
     scenario: string,
     isolationLevel: IsolationLevel,
@@ -194,6 +241,9 @@ export class TransactionIsolationService {
     }
     if (scenario === 'non-repeatable-read') {
       return this.runNonRepeatableReadScenario(isolationLevel);
+    }
+    if (scenario === 'phantom-read') {
+      return this.runPhantomReadScenario(isolationLevel);
     }
     return {
       scenario,
